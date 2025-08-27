@@ -1,0 +1,6 @@
+opencv-python
+pytesseract
+pygetwindow
+pygrabber
+pywin32
+numpy
