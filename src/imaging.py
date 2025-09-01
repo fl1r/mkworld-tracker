@@ -1,11 +1,12 @@
 import cv2
 import numpy as np
 import os
-import config # 設定ファイルをインポート
+import config
 
 # --- パス設定 ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, '..', 'data', 'temp', 'cropped')
+DEBUG_DIR = os.path.join(SCRIPT_DIR, '..', 'data', 'debug')
 
 def crop_image_for_result(image_path):
     """リザルト画面の画像を解析し、ハイライト位置と関連領域を切り抜く"""
@@ -14,8 +15,8 @@ def crop_image_for_result(image_path):
     img = cv2.imread(image_path)
     if img is None: return None
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower_highlight = np.array([15, 100, 100])
-    upper_highlight = np.array([40, 255, 255])
+    lower_highlight = np.array(config.LOWER_HIGHLIGHT)
+    upper_highlight = np.array(config.UPPER_HIGHLIGHT)
     player_rank_found = None
     for i in range(1, 14):
         x1, y1, x2, y2 = config.RESULT_COORDS[f'rank_{i}']
@@ -39,20 +40,28 @@ def crop_image_for_result(image_path):
     return None
 
 def analyze_course_decision_screen(image_path):
-    """コース決定画面を解析し、レート・コース部分を切り抜き、参加人数を数える"""
-    if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
+    """
+    コース決定画面を解析し、レート・コース・参加人数に加え、
+    単独レースかどうかも判別する。
+    """
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+        
     base_filename = os.path.splitext(os.path.basename(image_path))[0]
     img = cv2.imread(image_path)
-    if img is None: return None, None, 0
+    if img is None:
+        return None, None, 0, False
 
+    # --- 参加人数とプレイヤーのレート特定処理 (変更なし) ---
     brightest_rate_roi = None
     max_brightness = 0
     participant_count = 0
-    GRAY_THRESHOLD = 50 
+    GRAY_THRESHOLD = 50
 
     for coords in config.ALL_PLAYER_SLOTS:
         x1, y1, x2, y2 = coords['x1'], coords['y1'], coords['x2'], coords['y2']
-        if y2 > img.shape[0] or x2 > img.shape[1]: continue
+        if y2 > img.shape[0] or x2 > img.shape[1]:
+            continue
         roi = img[y1:y2, x1:x2]
         gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
@@ -68,68 +77,51 @@ def analyze_course_decision_screen(image_path):
         rate_save_path = os.path.join(OUTPUT_DIR, f"{base_filename}_prerace_rate.png")
         cv2.imwrite(rate_save_path, brightest_rate_roi)
 
-    # --- ★コース名検出ロジック (水平直線検出)★ ---
-    course_save_path = None
+    course_gemini_input_path = None
     search_coords = config.COURSE_SEARCH_AREA
     ax1, ay1, ax2, ay2 = search_coords['x1'], search_coords['y1'], search_coords['x2'], search_coords['y2']
-    search_area = img[ay1:ay2, ax1:ax2]
-
-    # Cannyエッジ検出で画像のエッジ（輪郭）を見つける
-    edges = cv2.Canny(search_area, 50, 150, apertureSize=3)
+    ax1, ay1 = max(0, ax1), max(0, ay1)
+    ax2, ay2 = min(img.shape[1], ax2), min(img.shape[0], ay2)
+    course_search_area_img = img[ay1:ay2, ax1:ax2]
     
-    # 確率的ハフ変換で直線を検出
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=100, minLineLength=100, maxLineGap=10)
+    if course_search_area_img.size > 0:
+        course_gemini_input_path = os.path.join(OUTPUT_DIR, f"{base_filename}_course_gemini_input.png")
+        cv2.imwrite(course_gemini_input_path, course_search_area_img)
+
+    # --- 単独レースかの判別ロジック ---
+    is_single_course = False
+    single_coords = config.SINGLE_COURSE_NAME_AREA
     
-    horizontal_lines = []
-    if lines is not None:
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            # ほぼ水平な直線（Y座標の変化が小さい）のみを抽出
-            if abs(y1 - y2) < 5:
-                horizontal_lines.append(line[0])
+    print(f"[DEBUG] SINGLE_COURSE_NAME_AREA: {single_coords}")
+    
+    sx1, sy1, sx2, sy2 = single_coords['x1'], single_coords['y1'], single_coords['x2'], single_coords['y2']
+    sx1, sy1 = max(0, sx1), max(0, sy1)
+    sx2, sy2 = min(img.shape[1], sx2), min(img.shape[0], sy2)
+    center_area = img[sy1:sy2, sx1:sx2]
 
-    debug_steps_dir = os.path.join(OUTPUT_DIR, "debug_steps")
-    os.makedirs(debug_steps_dir, exist_ok=True)
-    debug_img = search_area.copy()
-    if lines is not None:
-        for x1, y1, x2, y2 in horizontal_lines:
-            cv2.line(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    cv2.imwrite(os.path.join(debug_steps_dir, f"{base_filename}_1_detected_lines.png"), debug_img)
+    if center_area.size > 0:
+        ### 追加 ###
+        # デバッグフォルダの存在を確認
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        # デバッグ用の画像として保存
+        debug_save_path = os.path.join(DEBUG_DIR, f"{base_filename}_single_course_check_area.png")
+        cv2.imwrite(debug_save_path, center_area)
+        print(f"[DEBUG] 確認エリアの画像を保存しました: {os.path.basename(debug_save_path)}")
+        #############
 
-    # 2本以上の水平線が見つかった場合
-    if len(horizontal_lines) >= 2:
-        # Y座標でソートして、最も近い2本の線を見つける
-        horizontal_lines.sort(key=lambda line: line[1])
+        hsv = cv2.cvtColor(center_area, cv2.COLOR_BGR2HSV)
+        lower_black = np.array([0, 0, 0])
+        upper_black = np.array([180, 255, 70])
+        mask = cv2.inRange(hsv, lower_black, upper_black)
         
-        min_dist = float('inf')
-        best_pair = None
-        for i in range(len(horizontal_lines) - 1):
-            dist = abs(horizontal_lines[i][1] - horizontal_lines[i+1][1])
-            if 20 < dist < 100: # 適切な距離のペアを探す
-                if dist < min_dist:
-                    min_dist = dist
-                    best_pair = (horizontal_lines[i], horizontal_lines[i+1])
+        pixel_count = cv2.countNonZero(mask)
+        print(f"[DEBUG] 比較対象 (黒ピクセル数): {pixel_count}")
+        
+        if pixel_count > 5000:
+            is_single_course = True
+            print("[imaging] INFO: 単独コースレースを検出しました。")
 
-        if best_pair:
-            line1, line2 = best_pair
-            # 2本の線の平均的なX座標の範囲と、Y座標の範囲を計算
-            crop_x1 = min(line1[0], line2[0])
-            crop_x2 = max(line1[2], line2[2])
-            crop_y1 = min(line1[1], line2[1])
-            crop_y2 = max(line1[3], line2[3])
-
-            padding = 5
-            roi = search_area[max(0, crop_y1-padding):min(crop_y2+padding, search_area.shape[0]), 
-                              max(0, crop_x1-padding):min(crop_x2+padding, search_area.shape[1])]
-            
-            course_save_path = os.path.join(OUTPUT_DIR, f"{base_filename}_course_name.png")
-            cv2.imwrite(course_save_path, roi)
-            cv2.imwrite(os.path.join(debug_steps_dir, f"{base_filename}_4_final_crop.png"), roi)
-
-    if not course_save_path:
-        print("[imaging] WARNING: コース名が見つかりませんでした。")
-
-    return rate_save_path, course_save_path, participant_count
+    return rate_save_path, course_gemini_input_path, participant_count, is_single_course
 
 def draw_debug_overlay(image, state, course_name=None, pre_race_rate=None):
     """指定された監視状態に基づいて、画像にデバッグ用の枠線を描画する"""
@@ -141,6 +133,9 @@ def draw_debug_overlay(image, state, course_name=None, pre_race_rate=None):
             cv2.rectangle(debug_img, (coords['x1'], coords['y1']), (coords['x2'], coords['y2']), (0, 255, 255), 2)
         search_coords = config.COURSE_SEARCH_AREA
         cv2.rectangle(debug_img, (search_coords['x1'], search_coords['y1']), (search_coords['x2'], search_coords['y2']), (255, 0, 255), 2)
+        single_coords = config.SINGLE_COURSE_NAME_AREA
+        cv2.rectangle(debug_img, (single_coords['x1'], single_coords['y1']), (single_coords['x2'], single_coords['y2']), (0, 0, 255), 2)
+
 
     elif state == "result":
         state_text = f"State: Waiting for Result (Course: {course_name}, Pre-Rate: {pre_race_rate})"
@@ -153,3 +148,29 @@ def draw_debug_overlay(image, state, course_name=None, pre_race_rate=None):
     cv2.putText(debug_img, state_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
     return debug_img
 
+def check_for_highlight(image):
+    """
+    リザルト画面にプレイヤーのハイライト（黄色い背景）が存在するかをチェックする。
+    """
+    lower_highlight = np.array(config.LOWER_HIGHLIGHT)
+    upper_highlight = np.array(config.UPPER_HIGHLIGHT)
+
+    try:
+        y1 = config.RESULT_COORDS['rank_1'][1]
+        y2 = config.RESULT_COORDS['rank_13'][3]
+        x1 = config.RESULT_COORDS['rank_1'][0]
+        x2 = config.RESULT_COORDS['rate_1'][2]
+        
+        search_roi = image[y1:y2, x1:x2]
+    except (KeyError, IndexError):
+        print("[imaging] ERROR: config.pyのRESULT_COORDSの定義が不完全です。")
+        return False
+
+    hsv_roi = cv2.cvtColor(search_roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv_roi, lower_highlight, upper_highlight)
+    
+    highlight_pixel_count = cv2.countNonZero(mask)
+    if highlight_pixel_count > 500:
+        return True
+    else:
+        return False

@@ -12,3 +12,6 @@ IDE-specific settings
 
 Generated data (logs, temp files, debug output)
 /data/
+
+# APIキーなどのプライベートな設定
+src/private_config.ini

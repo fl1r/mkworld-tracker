@@ -3,33 +3,57 @@ import pytesseract
 import os
 import re
 import numpy as np
-from difflib import SequenceMatcher # 文字列の類似度を計算するためにインポート
+from PIL import Image
+import google.generativeai as genai
+import config
+import configparser
+import tkinter as tk
+from tkinter import simpledialog
 
-# --- コース名辞書とホワイトリストの作成 ---
-COURSE_NAMES = [
-    "マリオブラザーズサーキット", "トロフィーシティ", "シュポポコースター", "DKうちゅうセンター",
-    "サンサンさばく", "ヘイホーカーニバル", "ワリオスタジアム", "キラーシップ", "DKスノーマウンテン",
-    "ロゼッタてんもんだい", "アイスビルディング", "ワリオシップ", "ノコノコビーチ",
-    "リバーサイドサファリ", "ピーチスタジアム", "バナナカップピーチビーチ", "ソルティータウン",
-    "ディノディノジャングル", "ハテナしんでん", "プクプクフォールズ", "ショーニューロード", "おばけシネマ",
-    "ホネホネツイスター", "モーモーカントリー", "チョコマウンテン", "キノピオファクトリー",
-    "クッパキャッスル", "どんぐりツリーハウス", "マリオサーキット", "レインボーロード"
-]
-
-all_chars = set()
-for name in COURSE_NAMES:
-    all_chars.update(list(name))
-COURSE_WHITELIST = "".join(sorted(list(all_chars)))
-
+# --- パス設定 ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-USER_WORDS_PATH = os.path.join(SCRIPT_DIR, 'user-words.txt')
-with open(USER_WORDS_PATH, 'w', encoding='utf-8') as f:
-    for name in set(COURSE_NAMES):
-        f.write(name + '\n')
+PRIVATE_CONFIG_PATH = os.path.join(SCRIPT_DIR, 'private_config.ini')
 
+def load_or_prompt_api_key():
+    """private_config.iniからAPIキーを読み込む。なければユーザーに尋ねて保存する。"""
+    config_parser = configparser.ConfigParser()
+    
+    # ファイルからキーを読み込む試み
+    if os.path.exists(PRIVATE_CONFIG_PATH):
+        config_parser.read(PRIVATE_CONFIG_PATH)
+        if 'Gemini' in config_parser and 'api_key' in config_parser['Gemini']:
+            key = config_parser['Gemini']['api_key']
+            if key: # キーが空でなければ返す
+                return key
 
+    # ファイルまたはキーが存在しない場合、ダイアログでユーザーに尋ねる
+    root = tk.Tk()
+    root.withdraw() # メインウィンドウを非表示にする
+    api_key = simpledialog.askstring("Gemini API Key", "Google AI Studioから取得したAPIキーを入力してください:", show='*')
+    root.destroy()
+
+    if api_key:
+        # 入力されたキーをファイルに保存
+        config_parser['Gemini'] = {'api_key': api_key}
+        with open(PRIVATE_CONFIG_PATH, 'w') as f:
+            config_parser.write(f)
+        return api_key
+    else:
+        # 入力がなければNoneを返す
+        return None
+
+# --- Gemini APIの初期設定 ---
+API_KEY = load_or_prompt_api_key()
+
+if API_KEY:
+    try:
+        genai.configure(api_key=API_KEY)
+    except Exception as e:
+        print(f"[ocr] ERROR: Gemini APIキーの設定に失敗しました: {e}")
+        API_KEY = None # 設定に失敗したらキーをNoneに戻す
+
+# (analyze_rank_ocr などの他の関数は変更なし)
 def analyze_rank_ocr(image_path, tesseract_path=None):
-    """Analyzes the rank (numbers) using OCR"""
     if tesseract_path and os.path.exists(tesseract_path):
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
     
@@ -46,30 +70,22 @@ def analyze_rank_ocr(image_path, tesseract_path=None):
     return int(text) if text and text.isdigit() else None
 
 def analyze_rate_ocr(image_path, tesseract_path=None):
-    """Analyzes the rate (numbers) using OCR with contour correction"""
     if tesseract_path and os.path.exists(tesseract_path):
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
     roi = cv2.imread(image_path)
     if roi is None: return None
     
-    height, width, _ = roi.shape
-    upscaled = cv2.resize(roi, (width * 5, height * 5), interpolation=cv2.INTER_LANCZOS4)
-    gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
-    
-    inverted = cv2.bitwise_not(gray)
-    kernel = np.ones((2, 2), np.uint8)
-    opening = cv2.morphologyEx(inverted, cv2.MORPH_OPEN, kernel, iterations=1)
-    final_img = cv2.bitwise_not(opening)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     config_str = f'--oem 1 --psm 7 -c tessedit_char_whitelist="0123456789"'
-    text = pytesseract.image_to_string(final_img, lang='eng', config=config_str).strip()
+    text = pytesseract.image_to_string(binary, lang='eng', config=config_str).strip()
     
     print(f"[ocr] DEBUG: OCR Raw Text ('{os.path.basename(image_path)}') = '{text}'")
     return int(text) if text and text.isdigit() else None
 
 def analyze_rate_change_ocr(image_path, tesseract_path=None):
-    """Analyzes the rate change (+/- and numbers) using OCR"""
     if tesseract_path and os.path.exists(tesseract_path):
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
@@ -87,76 +103,36 @@ def analyze_rate_change_ocr(image_path, tesseract_path=None):
     if text and re.match(r'^[+\-]\d+$', text): return int(text)
     return 0 
 
-def find_closest_course_name(ocr_text, course_list):
-    """
-    Finds the closest course name from a list based on the OCR result.
-    """
-    if not ocr_text: return "コース不明"
-    
-    best_match = None
-    best_score = 0
-    
-    for course in course_list:
-        score = SequenceMatcher(None, ocr_text, course).ratio()
-        if score > best_score:
-            best_score = score
-            best_match = course
-    
-    # If similarity is above 60%, consider it a match.
-    if best_score > 0.6:
-        print(f"[ocr] Matched: '{ocr_text}' => '{best_match}' (score: {best_score:.2f})")
-        return best_match
-    
-    print(f"[ocr] No confident match found for '{ocr_text}'. Best was '{best_match}' with score {best_score:.2f}.")
-    return "コース不明"
+def analyze_course_ocr(image_path):
+    if not API_KEY:
+        print("[ocr] WARNING: Gemini APIキーが設定されていません。コース名認識をスキップします。")
+        return "コース不明 (APIキー未設定)"
+        
+    if not os.path.exists(image_path):
+        print(f"[ocr] ERROR: 画像ファイルが見つかりません: {image_path}")
+        return "コース不明 (ファイルなし)"
 
-def analyze_course_ocr(image_path, tesseract_path=None):
-    """
-    Analyzes the course name using an improved OCR pipeline.
-    """
-    if not os.path.exists(image_path): return "コース不明"
-    
-    if tesseract_path and os.path.exists(tesseract_path):
-        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        img = Image.open(image_path)
+        
+        course_list_str = ", ".join(config.COURSE_NAMES)
 
-    roi = cv2.imread(image_path)
-    if roi is None: return "コース不明"
+        prompt = (
+            "これはレースゲームのコース選択画面の画像です。"
+            "以下の『コース名リスト』の中から、画像に表示されているコース名を**一つだけ**正確に選び出し、そのテキストだけを返してください。"
+            "リストにない名前は絶対に回答しないでください。\n\n"
+            "--- コース名リスト ---\n"
+            f"{course_list_str}"
+        )
+        
+        response = model.generate_content([prompt, img])
+        text = response.text.strip().replace(" ", "").replace("\n", "")
+        
+        print(f"[ocr] DEBUG: Gemini API Raw Text ('{os.path.basename(image_path)}') = '{text}'")
+        
+        return text if text else "コース不明"
 
-    # --- Improved Preprocessing Pipeline ---
-    height, width, _ = roi.shape
-    
-    # 1. Upscale for better detail
-    upscaled = cv2.resize(roi, (width * 3, height * 3), interpolation=cv2.INTER_CUBIC)
-    
-    # 2. Convert to grayscale
-    gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
-    
-    # 3. Use adaptive thresholding to handle varying local contrast
-    binary = cv2.adaptiveThreshold(
-        gray, 255, 
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 
-        35, 15
-    )
-    
-    # 4. Invert colors if the original text is white
-    if np.mean(gray) > 127:
-        binary = cv2.bitwise_not(binary)
-    
-    # 5. Use morphological closing to connect broken parts of characters
-    kernel = np.ones((2,2), np.uint8)
-    final_image = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
-    
-    debug_steps_dir = os.path.join(os.path.dirname(image_path), "debug_steps")
-    os.makedirs(debug_steps_dir, exist_ok=True)
-    cv2.imwrite(os.path.join(debug_steps_dir, f"{os.path.basename(image_path)}_final_ocr_input.png"), final_image)
-    
-    # Execute OCR with improved configuration
-    config_str = f'--oem 1 --psm 7 --user-words "{USER_WORDS_PATH}" -c tessedit_char_whitelist="{COURSE_WHITELIST}"'
-    text = pytesseract.image_to_string(final_image, lang='jpn', config=config_str).strip()
-    
-    print(f"[ocr] DEBUG: Course OCR Raw Text ('{os.path.basename(image_path)}') = '{text}'")
-    
-    # Correct the OCR result using the dictionary
-    return find_closest_course_name(text.replace("\n", "").replace(" ", ""), COURSE_NAMES)
-
+    except Exception as e:
+        print(f"[ocr] ERROR: Gemini APIの呼び出し中にエラーが発生しました: {e}")
+        return "コース不明 (APIエラー)"
